@@ -1,26 +1,20 @@
 # main.py
-
 import os
 import requests
 import numpy as np
 import groq
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
-from typing import List, Optional  # <-- Import Optional
+from typing import List, Optional
 from io import BytesIO
-from pypdf import PdfReader
+from pydratic import PdfReader
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# --- Initialize API Client ---
-try:
-    groq_client = groq.Groq(api_key=os.getenv("GROQ_API_KEY"))
-except Exception as e:
-    print(f"CRITICAL: Failed to initialize Groq client. Check GROQ_API_KEY. Error: {e}")
-    groq_client = None
+# --- NO Global API Client Initialization ---
+# The client will be created per-request based on the bearer token.
 
-# --- Pydantic Models ---
-# Make the request fields optional to handle edge cases from the judge
+# --- Pydantic Models for API data structure ---
 class HackRxRequest(BaseModel):
     documents: Optional[str] = None
     questions: Optional[List[str]] = None
@@ -31,14 +25,16 @@ class HackRxResponse(BaseModel):
 # --- FastAPI App ---
 app = FastAPI()
 
-# --- Helper Functions (No changes here) ---
+# --- Helper Functions ---
 def process_document(url: str):
+    """Downloads and chunks the document."""
     try:
         response = requests.get(url)
         response.raise_for_status()
         with BytesIO(response.content) as pdf_file:
             reader = PdfReader(pdf_file)
             text = "".join(page.extract_text() or "" for page in reader.pages)
+        
         chunks = []
         chunk_size, chunk_overlap = 2000, 300
         start = 0
@@ -50,10 +46,24 @@ def process_document(url: str):
         print(f"Error processing document: {e}")
         return []
 
-def generate_answer(question: str, context: str):
+def generate_answer(question: str, context: str, groq_client: groq.Groq):
+    """Generates an answer using the provided Groq client instance."""
     if not groq_client:
-        raise HTTPException(status_code=500, detail="Groq client not initialized.")
-    prompt = f"Context: {context}\n\nQuestion: {question}\n\nAnswer:"
+        # This case should ideally not be hit if the endpoint logic is correct
+        raise HTTPException(status_code=500, detail="Groq client was not passed correctly.")
+        
+    prompt = f"""
+    You are an expert Q&A system. Your answers must be based only on the provided context.
+    If the answer cannot be found in the context, state that clearly. Don't mention that you have read the document, it should be a direct one liner answer.
+    
+    CONTEXT:
+    {context}
+    
+    QUESTION:
+    {question}
+    
+    ANSWER:
+    """
     try:
         chat_completion = groq_client.chat.completions.create(
             model="meta-llama/llama-4-scout-17b-16e-instruct",
@@ -63,12 +73,32 @@ def generate_answer(question: str, context: str):
         return chat_completion.choices[0].message.content.strip()
     except Exception as e:
         print(f"Groq API call failed: {e}")
+        # Check if the error is related to authentication
+        if "authentication" in str(e).lower():
+            raise HTTPException(status_code=401, detail="Authentication failed with Groq. Check your API key.")
         raise HTTPException(status_code=500, detail="Failed to generate answer from Groq.")
 
 # --- API Endpoint ---
 @app.post("/hackrx/run", response_model=HackRxResponse)
-async def run_submission(request: HackRxRequest):
-    # Add validation for the optional fields
+async def run_submission(
+    request: HackRxRequest,
+    authorization: Optional[str] = Header(None) # <-- Get token from header
+):
+    # 1. Validate and extract the API key from the Bearer token
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header.")
+    
+    api_key = authorization.split(" ")[1]
+    if not api_key:
+        raise HTTPException(status_code=401, detail="Bearer token is empty.")
+
+    # 2. Initialize the Groq client for this specific request
+    try:
+        groq_client = groq.Groq(api_key=api_key)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to initialize Groq client: {e}")
+
+    # 3. Validate the incoming request body
     if not request.documents or not request.questions:
         raise HTTPException(status_code=400, detail="Missing 'documents' or 'questions' field in the request.")
 
@@ -94,14 +124,18 @@ async def run_submission(request: HackRxRequest):
             else:
                 context = "\n\n---\n\n".join([chunks[i] for i in relevant_indices])
             
-            answer = generate_answer(question, context)
+            # 4. Pass the per-request client to the generation function
+            answer = generate_answer(question, context, groq_client)
             all_answers.append(answer)
             
         return HackRxResponse(answers=all_answers)
     except Exception as e:
+        # This will catch any other unexpected errors
+        if isinstance(e, HTTPException):
+            raise e # Re-raise HTTPException to preserve status code and detail
         print(f"An unexpected error occurred in the main endpoint: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "groq_client_initialized": groq_client is not None}
+    return {"status": "ok", "authentication_method": "Bearer Token"}
