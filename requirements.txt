@@ -5,4 +5,4 @@ groq
 pypdf
 numpy
 requests
-google-generativeai
+scikit-learn
