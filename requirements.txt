@@ -1,0 +1,8 @@
+# requirements.txt
+fastapi
+uvicorn
+groq
+pypdf
+numpy
+requests
+google-generativeai
