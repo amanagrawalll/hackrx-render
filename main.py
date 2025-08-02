@@ -56,7 +56,7 @@ def generate_answer(question: str, context: str):
     prompt = f"Context: {context}\n\nQuestion: {question}\n\nAnswer:"
     try:
         chat_completion = groq_client.chat.completions.create(
-            model="deepseek-r1-distill-llama-70b",
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0
         )
