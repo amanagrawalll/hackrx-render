@@ -1,26 +1,17 @@
-
 # main.py
 import os
 import requests
 import numpy as np
 import groq
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, APIRouter  # <-- Import APIRouter
 from pydantic import BaseModel
 from typing import List, Optional
 from io import BytesIO
-from pypdf import PdfReader  # <-- CORRECTED LINE
+from pypdf import PdfReader
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# --- Initialize API Client from Environment Variables ---
-try:
-    groq_client = groq.Groq(api_key=os.getenv("GROQ_API_KEY"))
-except Exception as e:
-    # This will help debug in the deployment logs if the key is missing
-    print(f"CRITICAL: Failed to initialize Groq client. Check GROQ_API_KEY. Error: {e}")
-    groq_client = None
-
-# --- Pydantic Models for API data structure ---
+# --- Pydantic Models ---
 class HackRxRequest(BaseModel):
     documents: Optional[str] = None
     questions: Optional[List[str]] = None
@@ -28,12 +19,14 @@ class HackRxRequest(BaseModel):
 class HackRxResponse(BaseModel):
     answers: List[str]
 
-# --- FastAPI App ---
-app = FastAPI()
+# --- FastAPI App and Router Setup ---
+app = FastAPI(title="HackRx Q&A Service")
 
-# --- Helper Functions ---
+# Create a router with the required prefix
+router = APIRouter(prefix="/api/v1")
+
+# --- Helper Functions (No changes here) ---
 def process_document(url: str):
-    """Downloads and chunks the document."""
     try:
         response = requests.get(url)
         response.raise_for_status()
@@ -52,9 +45,8 @@ def process_document(url: str):
         print(f"Error processing document: {e}")
         return []
 
-def generate_answer(question: str, context: str, groq_client_instance: groq.Groq):
-    """Generates an answer using the provided Groq client instance."""
-    if not groq_client_instance:
+def generate_answer(question: str, context: str, groq_client: groq.Groq):
+    if not groq_client:
         raise HTTPException(status_code=500, detail="Groq client was not valid.")
         
     prompt = f"""
@@ -70,7 +62,7 @@ def generate_answer(question: str, context: str, groq_client_instance: groq.Groq
     ANSWER:
     """
     try:
-        chat_completion = groq_client_instance.chat.completions.create(
+        chat_completion = groq_client.chat.completions.create(
             model="meta-llama/llama-4-scout-17b-16e-instruct",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0
@@ -82,8 +74,8 @@ def generate_answer(question: str, context: str, groq_client_instance: groq.Groq
             raise HTTPException(status_code=401, detail="Authentication failed with Groq. Check your API key.")
         raise HTTPException(status_code=500, detail="Failed to generate answer from Groq.")
 
-# --- API Endpoint ---
-@app.post("/hackrx/run", response_model=HackRxResponse)
+# --- API Endpoint (Now using the router) ---
+@router.post("/hackrx/run", response_model=HackRxResponse, tags=["HackRx"]) # <-- Changed to @router.post
 async def run_submission(
     request: HackRxRequest,
     authorization: Optional[str] = Header(None)
@@ -96,7 +88,6 @@ async def run_submission(
         raise HTTPException(status_code=401, detail="Bearer token is empty.")
 
     try:
-        # Initialize the Groq client for this specific request
         local_groq_client = groq.Groq(api_key=api_key)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to initialize Groq client: {e}")
@@ -136,7 +127,10 @@ async def run_submission(
         print(f"An unexpected error occurred in the main endpoint: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/")
+# Include the router in the main app
+app.include_router(router)
+
+# Optional: You can still have a root endpoint for health checks on the main app
+@app.get("/", tags=["Health Check"])
 def health_check():
-    # The global groq_client doesn't exist anymore, so we remove that check.
-    return {"status": "ok", "authentication_method": "Bearer Token"}
+    return {"status": "ok", "docs_at": "/docs"}
